@@ -1,0 +1,11 @@
+# Generated 3D viewers
+viewer-output/*.html
+viewer-output/*.txt
+
+*.svg
+
+# Roland EGX programmer's guide for reference
+PROGRAMMERS_GUIDE.pdf
+
+# Claude Code local settings
+.claude/
