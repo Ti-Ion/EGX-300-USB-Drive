@@ -93,12 +93,12 @@ Lift, spindle off, return to origin. Both converters emit this.
 - `svg2egx.py` warns (but does **not** refuse) on out-of-bounds bbox or
   negative coordinates (`svg2egx.py:303-310`). `gcode2egx.py` doesn't even
   warn — caller must verify.
-- README §"Safety / Practical Notes" (lines 275+) documents the
-  test-with-tool-up workflow before any real cut.
+- README §"Before your first real cut" documents the test-with-tool-up
+  workflow before any real cut.
 
 ---
 
-## Material defaults (from README §Common materials)
+## Material defaults
 
 | Material              | Depth        | VS feed |
 |-----------------------|--------------|---------|
