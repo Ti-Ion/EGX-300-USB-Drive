@@ -147,6 +147,9 @@ This is the most versatile workflow for signs, logos, artwork, and text.
   ```bash
   python3 svg2egx.py design.svg --offset-x 10 --offset-y 10 --send
   ```
+- **Non-mm SVGs** (browser exports, raw px, in/cm) — the converter auto-detects
+  the unit from the SVG's `viewBox` + `width`. If detection fails it errors out;
+  pass `--svg-units {mm,px,in,cm,pt}` to force a unit.
 
 ---
 

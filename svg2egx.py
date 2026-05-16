@@ -11,6 +11,7 @@ Usage:
     python3 svg2egx.py design.svg --preview             # Preview paths (matplotlib)
     python3 svg2egx.py design.svg --scale 2.0           # Scale design 2x
     python3 svg2egx.py design.svg --depth 0.3           # Engrave 0.3mm deep
+    python3 svg2egx.py design.svg --svg-units px        # Force unit (browser/raw SVGs)
 
 Inkscape workflow:
     1. Create design in Inkscape (mm units recommended)
@@ -55,6 +56,68 @@ SAFE_Z_UP = 500             # Z position when tool is up (5mm above surface)
 DEFAULT_DEPTH_MM = 0.2      # Default engraving depth in mm
 DEFAULT_FEED_RATE = 10      # Default VS value
 CURVE_TOLERANCE = 0.1       # Curve linearization tolerance in mm
+
+# CSS/SVG length units expressed in millimetres per unit.
+SVG_UNIT_TO_MM = {
+    'mm': 1.0,
+    'cm': 10.0,
+    'in': 25.4,
+    'pt': 25.4 / 72.0,
+    'pc': 25.4 / 6.0,
+    'px': 25.4 / 96.0,        # CSS reference pixel: 1px = 1/96 in
+    'q':  0.25,
+}
+
+
+def parse_svg_length(length_str):
+    """Parse an SVG length attribute like '100mm', '3in', '800px', '100'.
+
+    Returns (numeric_value, unit_or_None). Unit is lowercased; None means no
+    unit suffix was present. Returns (None, None) if the string is missing,
+    empty, malformed, or carries an unrecognised unit.
+    """
+    if length_str is None:
+        return (None, None)
+    s = str(length_str).strip()
+    if not s:
+        return (None, None)
+
+    i = 0
+    if s[i] in '+-':
+        i += 1
+    while i < len(s) and (s[i].isdigit() or s[i] == '.'):
+        i += 1
+    if i < len(s) and s[i] in 'eE':
+        i += 1
+        if i < len(s) and s[i] in '+-':
+            i += 1
+        while i < len(s) and s[i].isdigit():
+            i += 1
+
+    try:
+        value = float(s[:i])
+    except ValueError:
+        return (None, None)
+
+    unit = s[i:].strip().lower()
+    if unit == '':
+        return (value, None)
+    if unit in SVG_UNIT_TO_MM:
+        return (value, unit)
+    return (None, None)
+
+
+def parse_svg_viewbox(viewbox_str):
+    """Parse an SVG viewBox. Returns (min_x, min_y, width, height) or None."""
+    if not viewbox_str:
+        return None
+    parts = viewbox_str.replace(',', ' ').split()
+    if len(parts) != 4:
+        return None
+    try:
+        return tuple(float(p) for p in parts)
+    except ValueError:
+        return None
 
 
 def linearize_cubic_bezier(p0, p1, p2, p3, tolerance=CURVE_TOLERANCE):
@@ -137,13 +200,16 @@ class SVGToCAMM:
     """Convert SVG paths to CAMM-GL II commands."""
 
     def __init__(self, scale=1.0, offset_x=0, offset_y=0, depth_mm=DEFAULT_DEPTH_MM,
-                 feed_rate=DEFAULT_FEED_RATE, mirror_y=True):
+                 feed_rate=DEFAULT_FEED_RATE, mirror_y=True, svg_units='auto'):
         self.scale = scale
         self.offset_x = offset_x * UNITS_PER_MM
         self.offset_y = offset_y * UNITS_PER_MM
         self.depth_mm = depth_mm
         self.feed_rate = feed_rate
         self.mirror_y = mirror_y  # SVG Y-axis is inverted vs machine
+        self.svg_units = svg_units
+        self.user_unit_mm = None  # millimetres per SVG user unit, set during load
+        self.svg_height_user = 0.0  # SVG height in user units, for Y-mirror
         self.paths = []           # List of paths, each path is list of (x, y) points
         self.bounds = None
 
@@ -151,19 +217,24 @@ class SVGToCAMM:
         """Load SVG using svgpathtools (recommended)."""
         paths, attributes, svg_attributes = svg2paths2(filepath)
 
-        # Get SVG dimensions for Y-axis flipping
-        viewbox = svg_attributes.get('viewBox', '')
-        width = svg_attributes.get('width', '')
-        height = svg_attributes.get('height', '')
+        viewbox = parse_svg_viewbox(svg_attributes.get('viewBox', ''))
+        width_val, width_unit = parse_svg_length(svg_attributes.get('width'))
+        height_val, height_unit = parse_svg_length(svg_attributes.get('height'))
 
-        # Parse viewBox or dimensions
-        svg_height = 0
-        if viewbox:
-            parts = viewbox.split()
-            if len(parts) == 4:
-                svg_height = float(parts[3])
-        elif height:
-            svg_height = float(''.join(c for c in height if c.isdigit() or c == '.') or '0')
+        self.user_unit_mm = self._resolve_user_unit_mm(viewbox, width_val, width_unit)
+
+        if viewbox is not None:
+            self.svg_height_user = viewbox[3]
+        elif height_val is not None:
+            self.svg_height_user = height_val
+        elif self.mirror_y:
+            raise ValueError(
+                "Cannot determine SVG height for Y-axis mirroring: SVG has "
+                "neither a viewBox nor a height attribute. Add a viewBox to "
+                "the source file."
+            )
+        else:
+            self.svg_height_user = 0.0
 
         for path in paths:
             if len(path) == 0:
@@ -174,28 +245,28 @@ class SVGToCAMM:
                 if isinstance(segment, Line):
                     if not points:
                         points.append(self._convert_point(
-                            segment.start.real, segment.start.imag, svg_height))
+                            segment.start.real, segment.start.imag))
                     points.append(self._convert_point(
-                        segment.end.real, segment.end.imag, svg_height))
+                        segment.end.real, segment.end.imag))
 
                 elif isinstance(segment, CubicBezier):
                     if not points:
                         points.append(self._convert_point(
-                            segment.start.real, segment.start.imag, svg_height))
-                    p0 = self._convert_point(segment.start.real, segment.start.imag, svg_height)
-                    p1 = self._convert_point(segment.control1.real, segment.control1.imag, svg_height)
-                    p2 = self._convert_point(segment.control2.real, segment.control2.imag, svg_height)
-                    p3 = self._convert_point(segment.end.real, segment.end.imag, svg_height)
+                            segment.start.real, segment.start.imag))
+                    p0 = self._convert_point(segment.start.real, segment.start.imag)
+                    p1 = self._convert_point(segment.control1.real, segment.control1.imag)
+                    p2 = self._convert_point(segment.control2.real, segment.control2.imag)
+                    p3 = self._convert_point(segment.end.real, segment.end.imag)
                     line_points = linearize_cubic_bezier(p0, p1, p2, p3)
                     points.extend(line_points)
 
                 elif isinstance(segment, QuadraticBezier):
                     if not points:
                         points.append(self._convert_point(
-                            segment.start.real, segment.start.imag, svg_height))
-                    p0 = self._convert_point(segment.start.real, segment.start.imag, svg_height)
-                    p1 = self._convert_point(segment.control.real, segment.control.imag, svg_height)
-                    p2 = self._convert_point(segment.end.real, segment.end.imag, svg_height)
+                            segment.start.real, segment.start.imag))
+                    p0 = self._convert_point(segment.start.real, segment.start.imag)
+                    p1 = self._convert_point(segment.control.real, segment.control.imag)
+                    p2 = self._convert_point(segment.end.real, segment.end.imag)
                     line_points = linearize_quadratic_bezier(p0, p1, p2)
                     points.extend(line_points)
 
@@ -203,29 +274,64 @@ class SVGToCAMM:
                     # Linearize arc
                     if not points:
                         points.append(self._convert_point(
-                            segment.start.real, segment.start.imag, svg_height))
+                            segment.start.real, segment.start.imag))
                     # Sample points along the arc
                     n_samples = 20
                     for i in range(1, n_samples + 1):
                         t = i / n_samples
                         pt = segment.point(t)
-                        points.append(self._convert_point(pt.real, pt.imag, svg_height))
+                        points.append(self._convert_point(pt.real, pt.imag))
 
             if points:
                 self.paths.append(points)
 
         self._compute_bounds()
 
-    def _convert_point(self, x, y, svg_height):
-        """Convert SVG coordinates to machine coordinates."""
-        # SVG uses top-left origin with Y going down
-        # Machine uses bottom-left origin with Y going up
-        if self.mirror_y and svg_height > 0:
-            y = svg_height - y
+    def _resolve_user_unit_mm(self, viewbox, width_val, width_unit):
+        """Return the number of millimetres represented by one SVG user unit."""
+        if self.svg_units != 'auto':
+            if self.svg_units not in SVG_UNIT_TO_MM:
+                raise ValueError(
+                    f"Unknown --svg-units '{self.svg_units}'. "
+                    f"Supported: {', '.join(sorted(SVG_UNIT_TO_MM))}."
+                )
+            return SVG_UNIT_TO_MM[self.svg_units]
 
-        # Scale from SVG units (assumed mm if document is set up in mm) to machine units
-        mx = x * UNITS_PER_MM * self.scale + self.offset_x
-        my = y * UNITS_PER_MM * self.scale + self.offset_y
+        # viewBox + physical width: the two together pin the user-unit scale.
+        if viewbox is not None and width_unit is not None and width_val is not None:
+            vb_width = viewbox[2]
+            if vb_width <= 0:
+                raise ValueError(f"Invalid viewBox width: {vb_width}")
+            return (width_val * SVG_UNIT_TO_MM[width_unit]) / vb_width
+
+        # No viewBox but width carries a physical unit: 1 user unit == 1 of that unit.
+        if viewbox is None and width_unit is not None:
+            return SVG_UNIT_TO_MM[width_unit]
+
+        reasons = []
+        if viewbox is None:
+            reasons.append("no viewBox")
+        if width_val is None:
+            reasons.append("no width attribute")
+        elif width_unit is None:
+            reasons.append("width attribute has no unit (e.g. width='800' instead of width='800mm')")
+        raise ValueError(
+            f"Cannot determine SVG unit scale ({'; '.join(reasons)}). "
+            f"Re-export the SVG with an explicit viewBox and unit-bearing width, "
+            f"or pass --svg-units {{{','.join(sorted(SVG_UNIT_TO_MM))}}} to override."
+        )
+
+    def _convert_point(self, x, y):
+        """Convert SVG user-unit coordinates to machine units."""
+        # SVG uses top-left origin with Y going down; machine uses bottom-left
+        # with Y going up. Mirror around the SVG height (in user units) before
+        # converting to mm.
+        if self.mirror_y:
+            y = self.svg_height_user - y
+
+        mm_per_user = self.user_unit_mm * self.scale
+        mx = x * mm_per_user * UNITS_PER_MM + self.offset_x
+        my = y * mm_per_user * UNITS_PER_MM + self.offset_y
 
         return (mx, my)
 
@@ -294,6 +400,9 @@ class SVGToCAMM:
         print(f"  Paths: {len(self.paths)}")
         total_points = sum(len(p) for p in self.paths)
         print(f"  Total points: {total_points}")
+        if self.user_unit_mm is not None:
+            origin = 'forced' if self.svg_units != 'auto' else 'auto'
+            print(f"  SVG unit scale: 1 user unit = {self.user_unit_mm:.4f} mm ({origin})")
         print(f"  Bounding box:")
         print(f"    X: {self.bounds['min_x']/UNITS_PER_MM:.1f} to {self.bounds['max_x']/UNITS_PER_MM:.1f} mm")
         print(f"    Y: {self.bounds['min_y']/UNITS_PER_MM:.1f} to {self.bounds['max_y']/UNITS_PER_MM:.1f} mm")
@@ -376,6 +485,13 @@ Examples:
                         help=f'Engraving depth in mm (default: {DEFAULT_DEPTH_MM})')
     parser.add_argument('--feed', type=int, default=DEFAULT_FEED_RATE,
                         help=f'Feed rate / VS value (default: {DEFAULT_FEED_RATE})')
+    parser.add_argument('--svg-units',
+                        choices=['auto'] + sorted(SVG_UNIT_TO_MM),
+                        default='auto',
+                        help='Override the unit of one SVG user unit. '
+                             'Default auto-detects from viewBox + width; pass '
+                             'an explicit unit if auto-detection errors out '
+                             'or is wrong for your source.')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show commands without sending')
     parser.add_argument('--info-only', action='store_true',
@@ -399,10 +515,15 @@ Examples:
         offset_y=args.offset_y,
         depth_mm=args.depth,
         feed_rate=args.feed,
+        svg_units=args.svg_units,
     )
 
     print(f"Loading {args.svg_file}...")
-    converter.load_svg_svgpathtools(args.svg_file)
+    try:
+        converter.load_svg_svgpathtools(args.svg_file)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
     converter.print_info()
 
     if args.info_only:

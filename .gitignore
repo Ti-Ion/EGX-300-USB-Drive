@@ -9,3 +9,5 @@ PROGRAMMERS_GUIDE.pdf
 
 # Claude Code local settings
 .claude/
+
+__pycache__
