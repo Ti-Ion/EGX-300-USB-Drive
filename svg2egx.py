@@ -37,11 +37,7 @@ try:
 except ImportError:
     HAS_SVGPATHTOOLS = False
 
-try:
-    import xml.etree.ElementTree as ET
-    HAS_XML = True
-except ImportError:
-    HAS_XML = False
+from egx_send import send_raw
 
 
 # --- Configuration ---
@@ -121,8 +117,7 @@ def parse_svg_viewbox(viewbox_str):
 
 
 def linearize_cubic_bezier(p0, p1, p2, p3, tolerance=CURVE_TOLERANCE):
-    """Convert a cubic bezier curve to line segments."""
-    # Adaptive subdivision based on flatness
+    """Convert a cubic bezier curve to line segments via adaptive subdivision."""
     segments = []
     _subdivide_cubic(p0, p1, p2, p3, tolerance * UNITS_PER_MM, segments)
     return segments
@@ -130,7 +125,6 @@ def linearize_cubic_bezier(p0, p1, p2, p3, tolerance=CURVE_TOLERANCE):
 
 def _subdivide_cubic(p0, p1, p2, p3, tolerance, segments):
     """Recursively subdivide a cubic bezier until flat enough."""
-    # Flatness test: distance of control points from the line p0-p3
     dx = p3[0] - p0[0]
     dy = p3[1] - p0[1]
     d = math.sqrt(dx * dx + dy * dy)
@@ -139,7 +133,7 @@ def _subdivide_cubic(p0, p1, p2, p3, tolerance, segments):
         segments.append(p3)
         return
 
-    # Distance of control points from chord
+    # Flatness: max perpendicular distance of control points from the chord p0-p3
     d1 = abs((p1[0] - p0[0]) * dy - (p1[1] - p0[1]) * dx) / d
     d2 = abs((p2[0] - p0[0]) * dy - (p2[1] - p0[1]) * dx) / d
 
@@ -147,7 +141,6 @@ def _subdivide_cubic(p0, p1, p2, p3, tolerance, segments):
         segments.append(p3)
         return
 
-    # Subdivide at t=0.5 using de Casteljau
     m01 = midpoint(p0, p1)
     m12 = midpoint(p1, p2)
     m23 = midpoint(p2, p3)
@@ -161,35 +154,9 @@ def _subdivide_cubic(p0, p1, p2, p3, tolerance, segments):
 
 def linearize_quadratic_bezier(p0, p1, p2, tolerance=CURVE_TOLERANCE):
     """Convert a quadratic bezier to a cubic and linearize."""
-    # Elevate to cubic: cubic control points from quadratic
     c1 = (p0[0] + 2/3 * (p1[0] - p0[0]), p0[1] + 2/3 * (p1[1] - p0[1]))
     c2 = (p2[0] + 2/3 * (p1[0] - p2[0]), p2[1] + 2/3 * (p1[1] - p2[1]))
     return linearize_cubic_bezier(p0, c1, c2, p2, tolerance)
-
-
-def linearize_arc_segment(cx, cy, rx, ry, start_angle, sweep_angle, rotation=0,
-                          tolerance=CURVE_TOLERANCE):
-    """Convert an arc to line segments."""
-    # Number of segments based on arc length and tolerance
-    approx_radius = max(rx, ry)
-    approx_length = abs(sweep_angle) * approx_radius
-    n_segments = max(4, int(approx_length / (tolerance * UNITS_PER_MM)))
-
-    points = []
-    cos_rot = math.cos(rotation)
-    sin_rot = math.sin(rotation)
-
-    for i in range(1, n_segments + 1):
-        t = start_angle + sweep_angle * i / n_segments
-        # Point on the ellipse
-        px = rx * math.cos(t)
-        py = ry * math.sin(t)
-        # Apply rotation
-        x = cx + px * cos_rot - py * sin_rot
-        y = cy + px * sin_rot + py * cos_rot
-        points.append((x, y))
-
-    return points
 
 
 def midpoint(a, b):
@@ -208,9 +175,10 @@ class SVGToCAMM:
         self.feed_rate = feed_rate
         self.mirror_y = mirror_y  # SVG Y-axis is inverted vs machine
         self.svg_units = svg_units
-        self.user_unit_mm = None  # millimetres per SVG user unit, set during load
-        self.svg_height_user = 0.0  # SVG height in user units, for Y-mirror
-        self.paths = []           # List of paths, each path is list of (x, y) points
+        self.user_unit_mm = None
+        self.svg_height_user = 0.0
+        self._user_to_units = 1.0  # combined user-unit → machine-unit multiplier; set on load
+        self.paths = []
         self.bounds = None
 
     def load_svg_svgpathtools(self, filepath):
@@ -222,6 +190,7 @@ class SVGToCAMM:
         height_val, height_unit = parse_svg_length(svg_attributes.get('height'))
 
         self.user_unit_mm = self._resolve_user_unit_mm(viewbox, width_val, width_unit)
+        self._user_to_units = self.user_unit_mm * self.scale * UNITS_PER_MM
 
         if viewbox is not None:
             self.svg_height_user = viewbox[3]
@@ -236,54 +205,38 @@ class SVGToCAMM:
         else:
             self.svg_height_user = 0.0
 
+        convert = self._convert_point
         for path in paths:
             if len(path) == 0:
                 continue
 
-            points = []
+            points = [convert(path[0].start.real, path[0].start.imag)]
             for segment in path:
                 if isinstance(segment, Line):
-                    if not points:
-                        points.append(self._convert_point(
-                            segment.start.real, segment.start.imag))
-                    points.append(self._convert_point(
-                        segment.end.real, segment.end.imag))
+                    points.append(convert(segment.end.real, segment.end.imag))
 
                 elif isinstance(segment, CubicBezier):
-                    if not points:
-                        points.append(self._convert_point(
-                            segment.start.real, segment.start.imag))
-                    p0 = self._convert_point(segment.start.real, segment.start.imag)
-                    p1 = self._convert_point(segment.control1.real, segment.control1.imag)
-                    p2 = self._convert_point(segment.control2.real, segment.control2.imag)
-                    p3 = self._convert_point(segment.end.real, segment.end.imag)
-                    line_points = linearize_cubic_bezier(p0, p1, p2, p3)
-                    points.extend(line_points)
+                    p0 = convert(segment.start.real, segment.start.imag)
+                    p1 = convert(segment.control1.real, segment.control1.imag)
+                    p2 = convert(segment.control2.real, segment.control2.imag)
+                    p3 = convert(segment.end.real, segment.end.imag)
+                    points.extend(linearize_cubic_bezier(p0, p1, p2, p3))
 
                 elif isinstance(segment, QuadraticBezier):
-                    if not points:
-                        points.append(self._convert_point(
-                            segment.start.real, segment.start.imag))
-                    p0 = self._convert_point(segment.start.real, segment.start.imag)
-                    p1 = self._convert_point(segment.control.real, segment.control.imag)
-                    p2 = self._convert_point(segment.end.real, segment.end.imag)
-                    line_points = linearize_quadratic_bezier(p0, p1, p2)
-                    points.extend(line_points)
+                    p0 = convert(segment.start.real, segment.start.imag)
+                    p1 = convert(segment.control.real, segment.control.imag)
+                    p2 = convert(segment.end.real, segment.end.imag)
+                    points.extend(linearize_quadratic_bezier(p0, p1, p2))
 
                 elif isinstance(segment, Arc):
-                    # Linearize arc
-                    if not points:
-                        points.append(self._convert_point(
-                            segment.start.real, segment.start.imag))
-                    # Sample points along the arc
+                    # Fixed-sample fallback; svgpathtools' Arc lacks the rx/ry
+                    # parameterization linearize_arc_segment expects.
                     n_samples = 20
                     for i in range(1, n_samples + 1):
-                        t = i / n_samples
-                        pt = segment.point(t)
-                        points.append(self._convert_point(pt.real, pt.imag))
+                        pt = segment.point(i / n_samples)
+                        points.append(convert(pt.real, pt.imag))
 
-            if points:
-                self.paths.append(points)
+            self.paths.append(points)
 
         self._compute_bounds()
 
@@ -323,34 +276,32 @@ class SVGToCAMM:
 
     def _convert_point(self, x, y):
         """Convert SVG user-unit coordinates to machine units."""
-        # SVG uses top-left origin with Y going down; machine uses bottom-left
-        # with Y going up. Mirror around the SVG height (in user units) before
-        # converting to mm.
+        # SVG origin is top-left with Y down; machine origin is bottom-left with
+        # Y up. Mirror around the SVG height (in user units) before scaling.
         if self.mirror_y:
             y = self.svg_height_user - y
-
-        mm_per_user = self.user_unit_mm * self.scale
-        mx = x * mm_per_user * UNITS_PER_MM + self.offset_x
-        my = y * mm_per_user * UNITS_PER_MM + self.offset_y
-
-        return (mx, my)
+        return (x * self._user_to_units + self.offset_x,
+                y * self._user_to_units + self.offset_y)
 
     def _compute_bounds(self):
         """Compute bounding box of all paths."""
-        all_x = []
-        all_y = []
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
         for path in self.paths:
             for x, y in path:
-                all_x.append(x)
-                all_y.append(y)
+                if x < min_x: min_x = x
+                if x > max_x: max_x = x
+                if y < min_y: min_y = y
+                if y > max_y: max_y = y
 
-        if all_x:
-            self.bounds = {
-                'min_x': min(all_x), 'max_x': max(all_x),
-                'min_y': min(all_y), 'max_y': max(all_y),
-                'width_mm': (max(all_x) - min(all_x)) / UNITS_PER_MM,
-                'height_mm': (max(all_y) - min(all_y)) / UNITS_PER_MM,
-            }
+        if min_x == float('inf'):
+            return
+        self.bounds = {
+            'min_x': min_x, 'max_x': max_x,
+            'min_y': min_y, 'max_y': max_y,
+            'width_mm': (max_x - min_x) / UNITS_PER_MM,
+            'height_mm': (max_y - min_y) / UNITS_PER_MM,
+        }
 
     def generate_camm(self):
         """Generate CAMM-GL II command string from loaded paths."""
@@ -359,32 +310,23 @@ class SVGToCAMM:
             return ""
 
         z_down = int(-self.depth_mm * UNITS_PER_MM)
-        lines = []
+        lines = [
+            "IN;",                              # Initialize
+            "!MC1;",                            # Spindle ON
+            "PA;",                              # Absolute coordinates
+            f"VS{self.feed_rate};",             # Feed rate
+            f"!PZ{z_down},{SAFE_Z_UP};",        # Z down=cut depth, Z up=safe
+        ]
 
-        # Header
-        lines.append(f"IN;")                       # Initialize
-        lines.append(f"!MC1;")                      # Spindle ON
-        lines.append(f"PA;")                        # Absolute coordinates
-        lines.append(f"VS{self.feed_rate};")        # Feed rate
-        lines.append(f"!PZ{z_down},{SAFE_Z_UP};")  # Z positions
-
-        # Generate toolpaths
         for path in self.paths:
             if len(path) < 2:
                 continue
-
-            # Move to start of path with tool up
             x0, y0 = path[0]
             lines.append(f"PU{int(x0)},{int(y0)};")
-
-            # Engrave along path with tool down
             for x, y in path[1:]:
                 lines.append(f"PD{int(x)},{int(y)};")
-
-            # Lift tool at end of path
             lines.append("PU;")
 
-        # Footer
         lines.append("!MC0;")       # Spindle OFF
         lines.append("PU0,0;")      # Return to origin
 
@@ -555,9 +497,7 @@ Examples:
             print(f"\nSending to {args.device}...")
             confirm = input("Confirm send? (y/n): ").strip().lower()
             if confirm == 'y':
-                with open(args.device, 'wb') as dev:
-                    dev.write(camm_commands.encode('ascii'))
-                    dev.flush()
+                send_raw(args.device, camm_commands)
                 print("Sent successfully.")
             else:
                 print("Cancelled.")

@@ -24,6 +24,8 @@ import time
 
 
 DEFAULT_DEVICE = '/dev/usb/lp0'
+INIT_SEQ = "IN;!MC0;PA;VS10;!PZ0,500;"
+HOME_SEQ = "!MC0;PU0,0;"
 
 
 def send_raw(device_path, data, dry_run=False):
@@ -38,7 +40,6 @@ def send_raw(device_path, data, dry_run=False):
 
 def send_command(device_path, command, dry_run=False):
     """Send a CAMM-GL II command string."""
-    # Ensure the command doesn't have trailing whitespace issues
     command = command.strip()
     if not command:
         return
@@ -47,43 +48,49 @@ def send_command(device_path, command, dry_run=False):
 
 def init_sequence(device_path, dry_run=False):
     """Send a safe initialization sequence."""
-    commands = "IN;!MC0;PA;VS10;!PZ0,500;"
     print("Sending initialization sequence...")
     print("  IN;      - Initialize to defaults")
     print("  !MC0;    - Spindle OFF")
     print("  PA;      - Absolute coordinate mode")
     print("  VS10;    - Set moderate feed rate")
     print("  !PZ0,500; - Z down=0 (surface), Z up=500 (5mm safe)")
-    send_command(device_path, commands, dry_run)
+    send_command(device_path, INIT_SEQ, dry_run)
     print("Done.")
 
 
 def home_sequence(device_path, dry_run=False):
     """Move tool to home with spindle off."""
-    commands = "!MC0;PU0,0;"
     print("Sending home sequence (spindle off, move to 0,0)...")
-    send_command(device_path, commands, dry_run)
+    send_command(device_path, HOME_SEQ, dry_run)
     print("Done.")
 
 
 def send_file(device_path, filepath, dry_run=False, chunk_delay=0.05):
     """Send commands from a file, line by line."""
-    with open(filepath, 'r') as f:
-        lines = f.readlines()
+    def _command_lines():
+        with open(filepath, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    yield line
 
-    total = len([l for l in lines if l.strip() and not l.strip().startswith('#')])
+    if dry_run:
+        for line in _command_lines():
+            send_raw(device_path, line, dry_run=True)
+        return
+
+    # Open the device once; some printer drivers misbehave when bombarded with
+    # one open()/close() per line on long jobs.
     sent = 0
-
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        send_command(device_path, line, dry_run)
-        sent += 1
-        if sent % 100 == 0:
-            print(f"  Sent {sent}/{total} lines...")
-        if chunk_delay > 0 and not dry_run:
-            time.sleep(chunk_delay)
+    with open(device_path, 'wb') as dev:
+        for line in _command_lines():
+            dev.write(line.encode('ascii'))
+            dev.flush()
+            sent += 1
+            if sent % 100 == 0:
+                print(f"  Sent {sent} lines...")
+            if chunk_delay > 0:
+                time.sleep(chunk_delay)
 
     print(f"Sent {sent} command lines from {filepath}")
 
@@ -109,8 +116,8 @@ def interactive_mode(device_path, dry_run=False):
     print("-" * 60)
 
     shortcuts = {
-        'init': 'IN;!MC0;PA;VS10;!PZ0,500;',
-        'home': '!MC0;PU0,0;',
+        'init': INIT_SEQ,
+        'home': HOME_SEQ,
         'on': '!MC1;',
         'off': '!MC0;',
         'up': 'PU;',

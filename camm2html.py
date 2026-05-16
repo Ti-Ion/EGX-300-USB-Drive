@@ -35,6 +35,7 @@ THREE_FILENAME = "three.min.js"
 CUT, RAPID, PLUNGE, LIFT = 0, 1, 2, 3
 
 CMD_RE = re.compile(r'^(![A-Z]{2}|[A-Z]{2})(.*)$')
+_SPLIT_RE = re.compile(r'[;\r\n]+')
 
 
 def parse_params(s):
@@ -61,26 +62,27 @@ def parse_camm(text):
     positions = []
     types = []
 
+    # 2 decimal places matches the machine resolution (100 units/mm = 0.01 mm).
     def push_initial_vertex():
         if not positions:
             positions.extend([
-                round(cx / UNITS_PER_MM, 3),
-                round(cy / UNITS_PER_MM, 3),
-                round(cz / UNITS_PER_MM, 3),
+                round(cx / UNITS_PER_MM, 2),
+                round(cy / UNITS_PER_MM, 2),
+                round(cz / UNITS_PER_MM, 2),
             ])
 
     def emit(nx, ny, nz, t):
         nonlocal cx, cy, cz
         push_initial_vertex()
         positions.extend([
-            round(nx / UNITS_PER_MM, 3),
-            round(ny / UNITS_PER_MM, 3),
-            round(nz / UNITS_PER_MM, 3),
+            round(nx / UNITS_PER_MM, 2),
+            round(ny / UNITS_PER_MM, 2),
+            round(nz / UNITS_PER_MM, 2),
         ])
         types.append(t)
         cx, cy, cz = nx, ny, nz
 
-    for raw in text.replace('\n', '').replace('\r', '').split(';'):
+    for raw in _SPLIT_RE.split(text):
         cmd_text = raw.strip()
         if not cmd_text:
             continue
@@ -386,6 +388,7 @@ VIEWER_JS = r"""
   let zExag = 1, winStart = 0, winEnd = nSegs;
   let showRapid = true, showBg = true;
 
+  // Matches Python-side RAPID=1, PLUNGE=2, LIFT=3 (CUT=0 is the only "ish-not").
   function isRapidish(t) { return t === 1 || t === 2 || t === 3; }
 
   function updateColors() {

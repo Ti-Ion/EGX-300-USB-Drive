@@ -37,12 +37,18 @@ import math
 import re
 import os
 
+from egx_send import send_raw
+
 
 # Machine parameters
 UNITS_PER_MM = 100
 SAFE_Z_UP = 500
 Z_THRESHOLD_MM = 0.0  # Z values above this = tool up, below = tool down
 DEFAULT_DEVICE = '/dev/usb/lp0'
+
+_PARAM_RE = re.compile(r'([A-Za-z])([+-]?\d*\.?\d+)')
+_PAREN_COMMENT_RE = re.compile(r'\(.*?\)')
+_CODE_RE = re.compile(r'([GM])(\d+)', re.IGNORECASE)
 
 
 class GCodeParser:
@@ -57,7 +63,6 @@ class GCodeParser:
         self.z = 10.0  # Start with tool up
         self.feed_rate = 10
         self.tool_down = False
-        self.spindle_on = False
         self.commands = []
         self.paths = []  # For preview: list of (points, is_cut) tuples
         self._current_path = []
@@ -68,10 +73,7 @@ class GCodeParser:
 
     def _parse_params(self, line):
         """Extract letter-value pairs from a G-code line."""
-        params = {}
-        for match in re.finditer(r'([A-Za-z])([+-]?\d*\.?\d+)', line):
-            params[match.group(1).upper()] = float(match.group(2))
-        return params
+        return {m.group(1).upper(): float(m.group(2)) for m in _PARAM_RE.finditer(line)}
 
     def _scale(self, val):
         """Scale value based on inches/mm mode."""
@@ -112,14 +114,13 @@ class GCodeParser:
             now_down = new_z <= self.z_threshold
 
             if was_down and not now_down:
-                # Tool lifting
                 self.commands.append("PU;")
                 self.tool_down = False
                 if self._current_path:
                     self.paths.append((list(self._current_path), True))
                     self._current_path = []
             elif not was_down and now_down:
-                # Tool plunging - will start cutting on next XY move
+                # Plunge: don't emit PD yet; the next XY move converts to PD.
                 self.tool_down = True
 
         self.z = new_z
@@ -176,9 +177,8 @@ class GCodeParser:
             if sweep <= 0:
                 sweep += 2 * math.pi
 
-        # Linearize
         arc_length = abs(sweep * radius)
-        n_segments = max(4, int(arc_length / 0.2))  # 0.2mm segments
+        n_segments = max(4, int(arc_length / 0.2))  # ~0.2 mm chord
 
         for i in range(1, n_segments + 1):
             t = i / n_segments
@@ -206,14 +206,13 @@ class GCodeParser:
         self.commands.append(f"!PZ{self._to_machine(-abs(self.z_threshold) - 20)},{SAFE_Z_UP};")
 
         with open(filepath, 'r') as f:
-            for line_num, line in enumerate(f, 1):
+            for line in f:
                 line = line.strip()
 
-                # Remove comments
                 if ';' in line:
                     line = line[:line.index(';')]
                 if '(' in line:
-                    line = re.sub(r'\(.*?\)', '', line)
+                    line = _PAREN_COMMENT_RE.sub('', line)
                 line = line.strip()
 
                 if not line:
@@ -221,16 +220,15 @@ class GCodeParser:
 
                 params = self._parse_params(line)
 
-                # Extract the G/M code
-                code_match = re.match(r'([GM])(\d+\.?\d*)', line, re.IGNORECASE)
+                code_match = _CODE_RE.match(line)
                 if not code_match:
-                    # Could be a bare coordinate line (continuation of previous mode)
+                    # Bare coordinate line — continuation of previous G mode.
                     if 'X' in params or 'Y' in params or 'Z' in params:
                         self._handle_move(params, False)
                     continue
 
                 code_letter = code_match.group(1).upper()
-                code_num = int(float(code_match.group(2)))
+                code_num = int(code_match.group(2))
 
                 if code_letter == 'G':
                     if code_num == 0:
@@ -259,13 +257,8 @@ class GCodeParser:
                 elif code_letter == 'M':
                     if code_num == 3 or code_num == 4:
                         self.commands.append("!MC1;")
-                        self.spindle_on = True
                     elif code_num == 5:
                         self.commands.append("!MC0;")
-                        self.spindle_on = False
-                    elif code_num == 2 or code_num == 30:
-                        # Program end
-                        pass
 
         # Footer
         self.commands.append("PU;")
@@ -373,9 +366,7 @@ Supports G-code from: FreeCAD Path, Fusion 360, FlatCAM (PCBs),
             print(f"\nSending to {args.device}...")
             confirm = input("Confirm? (y/n): ").strip().lower()
             if confirm == 'y':
-                with open(args.device, 'wb') as dev:
-                    dev.write(camm.encode('ascii'))
-                    dev.flush()
+                send_raw(args.device, camm)
                 print("Sent.")
             else:
                 print("Cancelled.")
