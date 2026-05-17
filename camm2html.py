@@ -131,12 +131,16 @@ def parse_camm(text):
 
 
 def locate_three_js():
-    """Return the vendored three.min.js in viewer-output/, or exit if missing."""
+    """Return the vendored three.min.js in viewer-output/.
+
+    Raises FileNotFoundError if missing so library callers can present their
+    own error; main() catches and translates to a CLI-friendly message.
+    """
     path = DEFAULT_OUTPUT_DIR / THREE_FILENAME
     if not path.exists():
-        print(f"ERROR: {path} not found.", file=sys.stderr)
-        print("Run `python3 fetch_three.py` to download it.", file=sys.stderr)
-        sys.exit(1)
+        raise FileNotFoundError(
+            f"{path} not found. Run `python3 fetch_three.py` to download it."
+        )
     return path
 
 
@@ -496,11 +500,43 @@ VIEWER_JS = r"""
 """
 
 
+def default_output_path(stem):
+    """Default location for a generated viewer: viewer-output/<stem>.html."""
+    return DEFAULT_OUTPUT_DIR / (stem + '.html')
+
+
+def render_html(camm_text, out_path, title=None):
+    """Render CAMM-GL II command text as an interactive HTML viewer.
+
+    Parses `camm_text`, builds the standalone HTML page, and writes it to
+    `out_path` (parent directories are created as needed). The page imports
+    three.min.js via a relative path, so the vendored copy in viewer-output/
+    must exist — a missing copy raises FileNotFoundError.
+
+    Returns the parsed data dict (positions/types/z heights) so callers can
+    print segment counts or warn on empty input without re-parsing.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = parse_camm(camm_text)
+    three_js = locate_three_js()
+    three_path = relative_import_path(out_path.resolve(), three_js)
+
+    html = (HTML_TEMPLATE
+            .replace('__TITLE__', title or out_path.stem)
+            .replace('__DATA__', json.dumps(data, separators=(',', ':')))
+            .replace('__THREE_PATH__', three_path)
+            .replace('__VIEWER_JS__', VIEWER_JS))
+    out_path.write_text(html)
+    return data
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('camm_file', help='Input .camm file')
-    ap.add_argument('-o', '--output', help='Output HTML (default: <input>.html next to input)')
+    ap.add_argument('-o', '--output', help='Output HTML (default: viewer-output/<input>.html)')
     args = ap.parse_args()
 
     in_path = Path(args.camm_file)
@@ -508,32 +544,19 @@ def main():
         print(f"ERROR: file not found: {in_path}", file=sys.stderr)
         sys.exit(1)
 
-    if args.output:
-        out_path = Path(args.output)
-    else:
-        out_path = DEFAULT_OUTPUT_DIR / (in_path.stem + '.html')
-    out_dir = out_path.parent if str(out_path.parent) else Path('.')
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.output) if args.output else default_output_path(in_path.stem)
 
-    text = in_path.read_text()
-    data = parse_camm(text)
+    try:
+        data = render_html(in_path.read_text(), out_path, title=in_path.name)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
     n_seg = len(data['types'])
     print(f"Parsed {n_seg} segments from {in_path}")
     if n_seg == 0:
         print("WARNING: no PU/PD commands found.", file=sys.stderr)
-
-    three_js = locate_three_js()
-    three_path = relative_import_path(out_path.resolve(), three_js)
-
-    title = in_path.name
-    html = (HTML_TEMPLATE
-            .replace('__TITLE__', title)
-            .replace('__DATA__', json.dumps(data, separators=(',', ':')))
-            .replace('__THREE_PATH__', three_path)
-            .replace('__VIEWER_JS__', VIEWER_JS))
-    out_path.write_text(html)
     print(f"Wrote viewer to {out_path}")
-    print(f"  three.js: {three_js}  (imported as {three_path})")
     print(f"Open: file://{out_path.resolve()}")
 
 

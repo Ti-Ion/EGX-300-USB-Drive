@@ -36,8 +36,10 @@ import sys
 import math
 import re
 import os
+from pathlib import Path
 
 from egx_send import send_raw
+from camm2html import render_html, default_output_path
 
 
 # Machine parameters
@@ -291,34 +293,6 @@ class GCodeParser:
             print(f"    Y: {min(all_y):.1f} to {max(all_y):.1f} mm")
             print(f"    Size: {max(all_x)-min(all_x):.1f} x {max(all_y)-min(all_y):.1f} mm")
 
-    def preview(self):
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            print("matplotlib required for preview: pip install matplotlib")
-            return
-
-        fig, ax = plt.subplots(figsize=(10, 8))
-
-        for path, is_cut in self.paths:
-            if len(path) < 2:
-                continue
-            xs = [p[0] for p in path]
-            ys = [p[1] for p in path]
-            if is_cut:
-                ax.plot(xs, ys, 'b-', linewidth=1.0)
-            else:
-                ax.plot(xs, ys, 'r--', linewidth=0.3, alpha=0.4)
-
-        ax.set_xlabel('X (mm)')
-        ax.set_ylabel('Y (mm)')
-        ax.set_title('G-code → EGX-300 Toolpath Preview')
-        ax.set_aspect('equal')
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.show()
-
-
 def main():
     parser = argparse.ArgumentParser(
         description='Convert G-code to CAMM-GL II for Roland EGX-300',
@@ -330,7 +304,9 @@ Supports G-code from: FreeCAD Path, Fusion 360, FlatCAM (PCBs),
     parser.add_argument('-o', '--output', help='Output .camm command file')
     parser.add_argument('--send', action='store_true', help='Send directly')
     parser.add_argument('-d', '--device', default=DEFAULT_DEVICE)
-    parser.add_argument('--preview', action='store_true', help='Show preview')
+    parser.add_argument('--preview', action='store_true',
+                        help='Render an interactive 3D HTML viewer into viewer-output/ '
+                             '(requires three.min.js — run `python3 fetch_three.py` once)')
     parser.add_argument('--z-threshold', type=float, default=Z_THRESHOLD_MM,
                         help='Z threshold for tool up/down (mm, default: 0)')
     parser.add_argument('--dry-run', action='store_true')
@@ -346,11 +322,19 @@ Supports G-code from: FreeCAD Path, Fusion 360, FlatCAM (PCBs),
     converter.parse_file(args.gcode_file)
     converter.print_info()
 
-    if args.preview:
-        converter.preview()
-        return
-
     camm = converter.get_commands()
+
+    if args.preview:
+        gcode_path = Path(args.gcode_file)
+        out_html = default_output_path(gcode_path.stem)
+        try:
+            render_html(camm, out_html, title=gcode_path.name)
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"\nWrote viewer to {out_html}")
+        print(f"Open: file://{out_html.resolve()}")
+        return
 
     if args.output:
         with open(args.output, 'w') as f:

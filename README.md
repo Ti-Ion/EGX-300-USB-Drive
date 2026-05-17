@@ -2,6 +2,8 @@
 
 Python tools for driving a Roland EGX-300 desktop engraver from Linux over a USB-to-parallel cable. Convert SVG or G-code to CAMM-GL II, send jobs to the machine, and preview toolpaths in the browser.
 
+As of now ONLY the SVG workflow has been tested. G-code is still Work In Progress. 
+
 ## Reference
 
 - Roland EGX-300 programmer's guide (CAMM-GL II): https://downloadcenter.rolanddg.com/contents/manuals/CAMM-GL2_PRO_EN_R1.pdf
@@ -13,7 +15,7 @@ Python tools for driving a Roland EGX-300 desktop engraver from Linux over a USB
 
 ```bash
 pip install -r requirements.txt
-# (matplotlib is optional — only needed for --preview)
+python3 fetch_three.py    # one-time, downloads three.min.js for --preview
 
 # Give your user write access to the parallel device
 sudo usermod -aG lp $USER
@@ -27,9 +29,9 @@ Default device is `/dev/usb/lp0`; override with `--device` on any tool.
 | Tool | Purpose |
 |------|---------|
 | `egx_send.py` | Send CAMM-GL II to the machine — single command, interactive REPL, or `.camm` file |
-| `svg2egx.py` | SVG → CAMM-GL II |
+| `svg2egx.py` | SVG → CAMM-GL II (with `--preview` for an interactive 3D HTML viewer) |
 | `gcode2egx.py` | G-code → CAMM-GL II (FreeCAD Path, FlatCAM, etc.) |
-| `camm2html.py` | Render a `.camm` toolpath as an interactive 3D HTML viewer |
+| `camm2html.py` | Render an existing `.camm` toolpath as an interactive 3D HTML viewer |
 | `fetch_three.py` | One-time download of `three.min.js` for the viewer |
 
 ## Quick start
@@ -42,11 +44,10 @@ python3 egx_send.py "IN;"
 python3 egx_send.py -i
 
 # Convert and engrave an SVG
-python3 svg2egx.py design.svg --preview            # check it first
+python3 svg2egx.py design.svg --preview            # opens 3D viewer in viewer-output/
 python3 svg2egx.py design.svg --depth 0.2 --send   # engrave
 
-# Preview a .camm file in the browser
-python3 fetch_three.py                              # one-time
+# Re-view a saved .camm file
 python3 svg2egx.py design.svg -o design.camm
 python3 camm2html.py design.camm                    # → viewer-output/design.html
 ```
@@ -55,7 +56,7 @@ python3 camm2html.py design.camm                    # → viewer-output/design.h
 
 ## SVG workflow (Inkscape)
 
-The most versatile path — signs, logos, artwork, text.
+For signs, logos, artwork, text.
 
 1. **Set up the document.** Units → mm. Size ≤ 305 × 230 mm (machine bed).
 2. **Design freely.** Shapes, text, beziers, traced bitmaps — anything that becomes a path.
@@ -63,9 +64,10 @@ The most versatile path — signs, logos, artwork, text.
 4. **Save as Plain SVG** (File → Save As → Plain SVG).
 5. **Preview, then send:**
    ```bash
-   python3 svg2egx.py design.svg --preview
+   python3 svg2egx.py design.svg --preview            # writes viewer-output/design.html
    python3 svg2egx.py design.svg --depth 0.3 --feed 8 --send
    ```
+   `--preview` prints a `file://` URL — open it to inspect the 3D toolpath, scrub the move window, and exaggerate Z to see plunges.
 
 ### Tips
 
@@ -94,13 +96,15 @@ python3 egx_send.py -f job.camm
 
 Renders a `.camm` file as a self-contained HTML page: orbit/zoom in 3D, scrub a window over the move sequence, exaggerate Z to inspect plunges, toggle rapids.
 
+Both converters call this directly via `--preview`, so you only need `camm2html.py` on its own when re-viewing a saved `.camm` (or a `.camm` produced elsewhere).
+
 ```bash
 python3 fetch_three.py                       # one-time, ~600 KB
 python3 camm2html.py design.camm             # → viewer-output/design.html
 python3 camm2html.py design.camm -o /tmp/preview.html
 ```
 
-The HTML loads `three.min.js` via a relative path, so if you move the file keep the library reachable. `camm2html.py` exits with an error if `three.min.js` is missing — rerun `fetch_three.py` to grab it.
+The HTML loads `three.min.js` via a relative path, so if you move the file keep the library reachable. Both `--preview` and `camm2html.py` error out if `three.min.js` is missing — rerun `fetch_three.py` to grab it.
 
 **Controls:** drag = rotate, shift+drag = pan, wheel = zoom. Window start/end sliders restrict which segments are drawn (color sweeps purple → yellow across the visible range). Z-exaggeration goes up to 200× so shallow cuts and lifts become visible. "Ghost full path" keeps a faint outline of the whole job while the window is restricted.
 

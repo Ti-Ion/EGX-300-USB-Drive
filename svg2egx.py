@@ -8,7 +8,7 @@ This is the main design-to-machine pipeline. Create your design in Inkscape
 Usage:
     python3 svg2egx.py design.svg -o output.camm       # Convert to command file
     python3 svg2egx.py design.svg --send                # Convert and send directly
-    python3 svg2egx.py design.svg --preview             # Preview paths (matplotlib)
+    python3 svg2egx.py design.svg --preview             # Render interactive HTML viewer
     python3 svg2egx.py design.svg --scale 2.0           # Scale design 2x
     python3 svg2egx.py design.svg --depth 0.3           # Engrave 0.3mm deep
     python3 svg2egx.py design.svg --svg-units px        # Force unit (browser/raw SVGs)
@@ -23,13 +23,13 @@ Inkscape workflow:
 Dependencies:
     pip install svgpathtools    # SVG path parsing
     pip install numpy           # Math (usually already installed)
-    pip install matplotlib      # Only needed for --preview
 """
 
 import argparse
 import sys
 import math
 import os
+from pathlib import Path
 
 try:
     from svgpathtools import svg2paths2, Line, CubicBezier, QuadraticBezier, Arc
@@ -38,6 +38,7 @@ except ImportError:
     HAS_SVGPATHTOOLS = False
 
 from egx_send import send_raw
+from camm2html import render_html, default_output_path
 
 
 # --- Configuration ---
@@ -360,37 +361,6 @@ class SVGToCAMM:
             print(f"\n  *** WARNING: Design has negative coordinates! ***")
             print(f"  Use --offset-x / --offset-y to shift the design.")
 
-    def preview(self):
-        """Show a matplotlib preview of the toolpaths."""
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            print("matplotlib is required for preview: pip install matplotlib")
-            return
-
-        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-
-        for i, path in enumerate(self.paths):
-            xs = [p[0] / UNITS_PER_MM for p in path]
-            ys = [p[1] / UNITS_PER_MM for p in path]
-            ax.plot(xs, ys, linewidth=0.8)
-
-        ax.set_xlabel('X (mm)')
-        ax.set_ylabel('Y (mm)')
-        ax.set_title('EGX-300 Toolpath Preview')
-        ax.set_aspect('equal')
-        ax.grid(True, alpha=0.3)
-
-        # Show machine limits
-        ax.axhline(y=0, color='r', linestyle='--', alpha=0.3)
-        ax.axvline(x=0, color='r', linestyle='--', alpha=0.3)
-        ax.axhline(y=MAX_Y_MM, color='r', linestyle='--', alpha=0.3)
-        ax.axvline(x=MAX_X_MM, color='r', linestyle='--', alpha=0.3)
-
-        plt.tight_layout()
-        plt.show()
-
-
 def main():
     parser = argparse.ArgumentParser(
         description='Convert SVG to CAMM-GL II commands for Roland EGX-300',
@@ -416,7 +386,8 @@ Examples:
     parser.add_argument('-d', '--device', default=DEFAULT_DEVICE,
                         help=f'Device path (default: {DEFAULT_DEVICE})')
     parser.add_argument('--preview', action='store_true',
-                        help='Show matplotlib preview')
+                        help='Render an interactive 3D HTML viewer into viewer-output/ '
+                             '(requires three.min.js — run `python3 fetch_three.py` once)')
     parser.add_argument('--scale', type=float, default=1.0,
                         help='Scale factor (default: 1.0)')
     parser.add_argument('--offset-x', type=float, default=0,
@@ -471,16 +442,24 @@ Examples:
     if args.info_only:
         return
 
-    if args.preview:
-        converter.preview()
-        return
-
     # Generate commands
     camm_commands = converter.generate_camm()
 
     if not camm_commands:
         print("No commands generated. Check your SVG has paths.")
         sys.exit(1)
+
+    if args.preview:
+        svg_path = Path(args.svg_file)
+        out_html = default_output_path(svg_path.stem)
+        try:
+            render_html(camm_commands, out_html, title=svg_path.name)
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"\nWrote viewer to {out_html}")
+        print(f"Open: file://{out_html.resolve()}")
+        return
 
     # Output
     if args.output:
