@@ -12,8 +12,8 @@ Python tools for driving a Roland EGX-300 desktop engraver from Linux over a USB
 ## Setup
 
 ```bash
-pip install svgpathtools numpy
-pip install matplotlib   # optional, for --preview
+pip install -r requirements.txt
+# (matplotlib is optional — only needed for --preview)
 
 # Give your user write access to the parallel device
 sudo usermod -aG lp $USER

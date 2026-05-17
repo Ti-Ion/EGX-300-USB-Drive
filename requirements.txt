@@ -1,0 +1,2 @@
+svgpathtools
+matplotlib  # optional, only needed for --preview
