@@ -207,6 +207,17 @@ HTML_TEMPLATE = r"""<!doctype html>
   <div class="row"><label><input id="showRapid" type="checkbox" checked> Show rapids</label></div>
   <div class="row"><label><input id="showBg" type="checkbox" checked> Ghost full path</label></div>
   <div class="row"><span id="stats" style="opacity:0.7; font-size:11px;"></span></div>
+  <div class="row" style="margin-top:8px; padding-top:8px; border-top:1px solid #2a2a2e;">
+    <label>Travel speed</label>
+    <input id="travelSpeed" class="num" type="number" min="0.1" step="0.5" value="50">
+    <span style="opacity:0.55; margin-left:6px;">mm/s</span></div>
+  <div class="row"><label>Cut speed</label>
+    <input id="cutSpeed" class="num" type="number" min="0.1" step="0.5" value="10">
+    <span style="opacity:0.55; margin-left:6px;">mm/s</span></div>
+  <div class="row"><label title="tool lower/raise (plunge + lift) on Z">Plunge/lift</label>
+    <input id="zSpeed" class="num" type="number" min="0.1" step="0.5" value="5">
+    <span style="opacity:0.55; margin-left:6px;">mm/s</span></div>
+  <div id="duration" style="margin-top:6px; font-size:12px; opacity:0.9;"></div>
 </div>
 <div id="legend">
   <span class="swatch" style="background:#e83e8c"></span>start &nbsp;
@@ -263,6 +274,23 @@ VIEWER_JS = r"""
   }
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   const sizeXY = Math.max(maxX - minX, maxY - minY, 50);
+
+  // Per-bucket path lengths (mm) for the duration estimate. Every move type is
+  // counted, each at its own speed: CUT(0) cuts through material (cut speed),
+  // RAPID(1) is tool-up positioning (travel speed), and PLUNGE(2)/LIFT(3) are
+  // the tool lowering/raising on Z (plunge/lift speed, i.e. the machine's !VZ).
+  // Lengths are 3D, so plunges/lifts contribute their Z travel.
+  let cutDist = 0, travelDist = 0, zDist = 0;
+  for (let i = 0; i < nSegs; i++) {
+    const o = i * 6;
+    const dx = segPos[o+3] - segPos[o+0];
+    const dy = segPos[o+4] - segPos[o+1];
+    const dz = segPos[o+5] - segPos[o+2];
+    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (segType[i] === 0) cutDist += len;
+    else if (segType[i] === 1) travelDist += len;
+    else zDist += len;
+  }
 
   // Three.js setup
   const canvas = document.getElementById('c');
@@ -434,6 +462,34 @@ VIEWER_JS = r"""
   const winStartNum = $('winStartNum'), winEndNum = $('winEndNum'), zExagNum = $('zExagNum');
   const showRapidEl = $('showRapid'), showBgEl = $('showBg');
   const statsEl = $('stats');
+  const travelSpeedEl = $('travelSpeed'), cutSpeedEl = $('cutSpeed'), zSpeedEl = $('zSpeed');
+  const durationEl = $('duration');
+
+  // Format seconds as "1h 2m 3s" / "2m 3s" / "3s".
+  function formatDuration(s) {
+    if (!isFinite(s) || s < 0) return '—';
+    s = Math.round(s);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (h) return `${h}h ${m}m ${sec}s`;
+    if (m) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  }
+
+  // Estimate ignores spindle accel/decel, dwell, and the per-line send delay,
+  // so it's a floor on real wall-clock time.
+  function updateDuration() {
+    const ts = parseFloat(travelSpeedEl.value), cs = parseFloat(cutSpeedEl.value),
+          zs = parseFloat(zSpeedEl.value);
+    const cutT = cs > 0 ? cutDist / cs : Infinity;
+    const travelT = ts > 0 ? travelDist / ts : Infinity;
+    const zT = zs > 0 ? zDist / zs : Infinity;
+    const mm = d => d.toLocaleString(undefined, {maximumFractionDigits: 0});
+    durationEl.innerHTML =
+      `Est. duration: <b>${formatDuration(cutT + travelT + zT)}</b><br>` +
+      `<span style="opacity:0.6">cut ${formatDuration(cutT)} (${mm(cutDist)} mm) ` +
+      `&middot; travel ${formatDuration(travelT)} (${mm(travelDist)} mm) ` +
+      `&middot; plunge/lift ${formatDuration(zT)} (${mm(zDist)} mm)</span>`;
+  }
 
   // Range/number pairs: each shares min/max and stays in sync.
   const pairs = [
@@ -485,6 +541,7 @@ VIEWER_JS = r"""
     });
   }
   [showRapidEl, showBgEl].forEach(el => el.addEventListener('input', refresh));
+  [travelSpeedEl, cutSpeedEl, zSpeedEl].forEach(el => el.addEventListener('input', updateDuration));
 
   function render() { renderer.render(scene, camera); }
   window.addEventListener('resize', () => {
@@ -496,6 +553,7 @@ VIEWER_JS = r"""
 
   updateCam();
   refresh();
+  updateDuration();
 })();
 """
 

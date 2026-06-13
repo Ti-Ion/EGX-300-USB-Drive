@@ -96,6 +96,8 @@ python3 egx_send.py -f job.camm
 
 Renders a `.camm` file as a self-contained HTML page: orbit/zoom in 3D, scrub a window over the move sequence, exaggerate Z to inspect plunges, toggle rapids.
 
+It also estimates the job's run time. Enter a **travel speed**, **cut speed**, and **plunge/lift speed** (all mm/s) in the panel and the page shows an estimated duration that updates as you type. Cutting moves are timed at the cut speed, tool-up rapids at the travel speed, and Z lower/raise moves at the plunge/lift speed (the machine's `!VZ` rate). It's a lower bound — it ignores spindle accel/decel, dwell, and `egx_send.py`'s per-line send delay.
+
 Both converters call this directly via `--preview`, so you only need `camm2html.py` on its own when re-viewing a saved `.camm` (or a `.camm` produced elsewhere).
 
 ```bash
